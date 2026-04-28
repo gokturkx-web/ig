@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/
+results/
+# Proxy listeleri kimlik bilgisi içerebilir; örnek dosya dışındakileri commitleme.
+proxies.txt
+proxies*.txt
+!examples/proxies.example.txt
