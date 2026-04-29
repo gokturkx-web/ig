@@ -36,10 +36,26 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def load_server_proxies() -> List[str]:
-    """Server'da `proxies.txt` varsa oku. Yoksa boş liste."""
+    """Proxy listesini yükle.
+
+    Kaynaklar (sırayla denenir):
+      1. `IG_SCANNER_PROXIES` ortam değişkeni (newline veya virgülle ayrılmış).
+      2. `IG_SCANNER_PROXIES_FILE` ortam değişkeninin işaret ettiği dosya.
+      3. Çalışma dizinindeki `proxies.txt`.
+    """
+    env = os.environ.get("IG_SCANNER_PROXIES")
+    if env:
+        out: List[str] = []
+        for chunk in env.replace(",", "\n").splitlines():
+            chunk = chunk.strip()
+            if chunk and not chunk.startswith("#"):
+                out.append(chunk)
+        if out:
+            return out
+
     candidates = [
-        Path("proxies.txt"),
         Path(os.environ.get("IG_SCANNER_PROXIES_FILE", "")),
+        Path("proxies.txt"),
     ]
     for p in candidates:
         if p and p.is_file():

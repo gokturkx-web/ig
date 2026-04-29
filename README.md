@@ -22,6 +22,18 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e .
 ```
 
+## Web arayüzü
+
+```bash
+ig-web --host 0.0.0.0 --port 8000
+# tarayıcıdan http://localhost:8000
+```
+
+Textarea'ya nickleri yapıştır (her satıra bir tane), "Tara" → sonuçlar canlı
+olarak tabloya düşer. Sonuçlar durumlarına göre renklendirilir; CSV olarak
+indirebilirsin. `proxies.txt` server'ın çalıştığı dizinde varsa otomatik
+kullanılır.
+
 ## Tek nick kontrolü
 
 ```bash
