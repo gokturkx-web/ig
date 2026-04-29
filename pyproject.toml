@@ -5,11 +5,18 @@ description = "Instagram'da boş kullanıcı adlarını signup endpoint'i üzeri
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "sse-starlette>=2.0",
 ]
 
 [project.scripts]
 ig-scanner = "ig_scanner.scanner:main"
 ig-check = "ig_scanner.checker:_main"
+ig-web = "ig_scanner.web:_cli"
+
+[tool.setuptools.package-data]
+ig_scanner = ["static/*.html", "static/*.css", "static/*.js"]
 
 [build-system]
 requires = ["setuptools>=68"]

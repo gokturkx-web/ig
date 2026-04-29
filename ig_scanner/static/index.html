@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Instagram Nick Tarayıcı</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Instagram Nick Tarayıcı</h1>
+      <p class="sub">
+        Signup endpoint tabanlı — 404 değil. Boş / alınmış / rezerve / yasaklı
+        nickleri ayırt eder.
+      </p>
+    </header>
+
+    <main>
+      <section class="panel input-panel">
+        <label for="usernames"
+          >Kullanıcı adları (her satıra bir tane, virgülle de ayırabilirsin)</label
+        >
+        <textarea
+          id="usernames"
+          rows="10"
+          placeholder="cristiano&#10;instagram&#10;admin&#10;xkcdtest9z9z9z"
+        ></textarea>
+
+        <div class="controls">
+          <label class="checkbox">
+            <input type="checkbox" id="use-proxies" checked />
+            Server proxy listesini kullan
+            <span class="proxy-info" id="proxy-info">(yükleniyor...)</span>
+          </label>
+          <label>
+            İstek arası gecikme (sn)
+            <input
+              type="number"
+              id="delay"
+              value="2.5"
+              min="0"
+              step="0.5"
+              style="width: 6em"
+            />
+          </label>
+          <button id="run">Tara</button>
+          <button id="stop" class="secondary" disabled>Durdur</button>
+          <button id="csv" class="secondary" disabled>CSV indir</button>
+        </div>
+
+        <div id="status" class="status"></div>
+      </section>
+
+      <section class="panel results-panel">
+        <div class="summary" id="summary"></div>
+        <table id="results">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Nick</th>
+              <th>Durum</th>
+              <th>IG Kodu</th>
+              <th>Mesaj</th>
+              <th>Proxy</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        Kaynak:
+        <a href="https://github.com/gokturkx-web/ig" target="_blank"
+          >github.com/gokturkx-web/ig</a
+        >
+      </p>
+    </footer>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
