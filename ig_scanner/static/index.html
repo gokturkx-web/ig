@@ -29,35 +29,48 @@
           >
           <textarea
             id="usernames"
-            rows="8"
+            rows="6"
             placeholder="cristiano&#10;instagram&#10;admin&#10;xkcdtest9z9z9z"
           ></textarea>
+          <div class="step-row">
+            <button id="prepare-manual" class="secondary">Listeyi hazırla</button>
+          </div>
         </div>
 
         <div class="tab-content hidden" id="tab-generated">
-          <label>Hane (uzunluk)</label>
-          <select id="gen-length">
-            <option value="3">3 hane</option>
-            <option value="4" selected>4 hane</option>
-            <option value="5">5 hane</option>
-            <option value="6">6 hane</option>
-            <option value="7">7 hane</option>
-            <option value="8">8 hane</option>
-          </select>
-
-          <label style="margin-top: 10px">Adet (en fazla 500)</label>
-          <input type="number" id="gen-count" value="50" min="1" max="500" />
-
-          <label style="margin-top: 10px">Karakter seti</label>
-          <select id="gen-alphabet">
-            <option value="alnum" selected>Harf + rakam (a-z, 0-9)</option>
-            <option value="alpha">Sadece harf (a-z)</option>
-            <option value="num">Sadece rakam (0-9)</option>
-            <option value="alnum_dot">Harf + rakam + . _</option>
-          </select>
-
+          <div class="form-grid">
+            <div>
+              <label>Hane (uzunluk)</label>
+              <select id="gen-length">
+                <option value="3">3 hane</option>
+                <option value="4" selected>4 hane</option>
+                <option value="5">5 hane</option>
+                <option value="6">6 hane</option>
+                <option value="7">7 hane</option>
+                <option value="8">8 hane</option>
+              </select>
+            </div>
+            <div>
+              <label>Adet (1-500)</label>
+              <input type="number" id="gen-count" value="50" min="1" max="500" />
+            </div>
+            <div class="full">
+              <label>Karakter seti</label>
+              <select id="gen-alphabet">
+                <option value="alnum" selected>Harf + rakam (a-z, 0-9)</option>
+                <option value="alpha">Sadece harf (a-z)</option>
+                <option value="num">Sadece rakam (0-9)</option>
+                <option value="alnum_dot">Harf + rakam + . _</option>
+              </select>
+            </div>
+          </div>
           <p class="hint" id="gen-hint"></p>
+          <div class="step-row">
+            <button id="generate" class="secondary">Üret</button>
+          </div>
         </div>
+
+        <hr class="divider" />
 
         <div class="controls">
           <label class="checkbox">
@@ -76,9 +89,13 @@
               style="width: 5em"
             />
           </label>
-          <button id="run">Tara</button>
+        </div>
+
+        <div class="controls">
+          <button id="run" disabled>Tara</button>
           <button id="stop" class="secondary" disabled>Durdur</button>
           <button id="csv" class="secondary" disabled>CSV indir</button>
+          <button id="clear" class="secondary" disabled>Temizle</button>
         </div>
 
         <div id="status" class="status"></div>

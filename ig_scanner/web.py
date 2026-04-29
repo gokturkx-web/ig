@@ -355,6 +355,21 @@ def create_app() -> FastAPI:
             k: {"chars": v, "size": len(v)} for k, v in ALPHABETS.items()
         }
 
+    class GenerateRequest(BaseModel):
+        length: int = Field(..., ge=1, le=MAX_LENGTH)
+        count: int = Field(..., ge=1, le=MAX_USERNAMES_PER_JOB)
+        alphabet: str = "alnum"
+
+    @app.post("/api/generate")
+    def gen_usernames(req: GenerateRequest) -> dict:
+        try:
+            usernames = generate_random_usernames(
+                req.length, req.count, req.alphabet
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"usernames": usernames, "count": len(usernames)}
+
     @app.post("/api/jobs")
     def create_job(req: JobRequest) -> dict:
         _gc_old_jobs()
