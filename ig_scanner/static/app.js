@@ -12,8 +12,11 @@ const STATUS_LABELS = {
   unknown: "Bilinmiyor",
 };
 
-let abortController = null;
+let currentJobId = null;
+let pollTimer = null;
 let allResults = [];
+let activeFilter = null;
+let activeTab = "manual";
 
 async function refreshProxyInfo() {
   try {
@@ -37,26 +40,36 @@ function parseUsernames(text) {
     .filter(Boolean);
 }
 
-function renderRow(payload) {
+function escapeHtml(s) {
+  return String(s ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function renderResults() {
   const tbody = $("results").querySelector("tbody");
-  const tr = document.createElement("tr");
-  // payload.status sadece bilinen anahtarlardan biri (STATUS_LABELS), o
-  // yüzden CSS sınıfı olarak doğrudan kullanılabilir; ama yine de
-  // beklenmedik bir değer gelirse escape ediyoruz.
-  const status = payload.status in STATUS_LABELS ? payload.status : "unknown";
-  tr.innerHTML = `
-    <td>${payload.index + 1}</td>
-    <td class="nick">${escapeHtml(payload.username)}</td>
-    <td><span class="badge ${status}">${escapeHtml(
-    STATUS_LABELS[status] || status
-  )}</span></td>
-    <td class="code">${escapeHtml(payload.code || "")}</td>
-    <td>${escapeHtml(payload.message || "")}</td>
-    <td class="proxy">${escapeHtml(payload.proxy || "kendi IP")}</td>
-  `;
-  tbody.appendChild(tr);
-  // En son satıra scroll et
-  tr.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  tbody.innerHTML = "";
+  const filtered = activeFilter
+    ? allResults.filter((r) => r.status === activeFilter)
+    : allResults;
+  for (const r of filtered) {
+    const tr = document.createElement("tr");
+    const status = r.status in STATUS_LABELS ? r.status : "unknown";
+    tr.innerHTML = `
+      <td>${r.index + 1}</td>
+      <td class="nick">${escapeHtml(r.username)}</td>
+      <td><span class="badge ${status}">${escapeHtml(
+      STATUS_LABELS[status] || status
+    )}</span></td>
+      <td class="code">${escapeHtml(r.code || "")}</td>
+      <td>${escapeHtml(r.message || r.error || "")}</td>
+      <td class="proxy">${escapeHtml(r.proxy || "kendi IP")}</td>
+    `;
+    tbody.appendChild(tr);
+  }
 }
 
 function updateSummary() {
@@ -71,116 +84,170 @@ function updateSummary() {
     "invalid_format",
     "unknown",
   ];
-  const html = [`<span class="pill">Toplam <strong>${allResults.length}</strong></span>`];
+  const html = [
+    `<span class="pill ${activeFilter ? "" : "active"}" data-status="">Toplam <strong>${allResults.length}</strong></span>`,
+  ];
   for (const k of order) {
     if (counts[k]) {
       html.push(
-        `<span class="pill"><span class="badge ${k}">${
+        `<span class="pill ${activeFilter === k ? "active" : ""}" data-status="${k}"><span class="badge ${k}">${
           STATUS_LABELS[k] || k
         }</span><strong>${counts[k]}</strong></span>`
       );
     }
   }
   $("summary").innerHTML = html.join("");
-}
-
-function escapeHtml(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-async function run() {
-  const usernames = parseUsernames($("usernames").value);
-  if (usernames.length === 0) {
-    $("status").textContent = "En az bir nick gir.";
-    return;
+  for (const el of $("summary").querySelectorAll(".pill")) {
+    el.addEventListener("click", () => {
+      activeFilter = el.dataset.status || null;
+      updateSummary();
+      renderResults();
+    });
   }
+}
+
+async function startScan() {
+  const body = buildJobRequest();
+  if (!body) return;
+
   $("results").querySelector("tbody").innerHTML = "";
   $("summary").innerHTML = "";
   allResults = [];
+  activeFilter = null;
+  setRunning(true);
+  $("status").textContent = "Başlatılıyor...";
 
-  $("run").disabled = true;
-  $("stop").disabled = false;
-  $("csv").disabled = true;
-  $("status").textContent = `Bağlanıyor...`;
-
-  abortController = new AbortController();
-
+  let resp;
   try {
-    const resp = await fetch("/api/check", {
+    resp = await fetch("/api/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        usernames,
-        use_server_proxies: $("use-proxies").checked,
-        per_request_delay: parseFloat($("delay").value) || 2.5,
-      }),
-      signal: abortController.signal,
+      body: JSON.stringify(body),
     });
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      $("status").textContent = `Hata: HTTP ${resp.status} ${text}`;
-      return;
-    }
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let nl;
-      while ((nl = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (!line) continue;
-        const ev = JSON.parse(line);
-        handleEvent(ev);
-      }
-    }
   } catch (e) {
-    if (e.name === "AbortError") {
-      $("status").textContent = "Durduruldu.";
-    } else {
-      $("status").textContent = `Hata: ${e.message}`;
+    setRunning(false);
+    $("status").textContent = `Bağlantı hatası: ${e.message}`;
+    return;
+  }
+  if (!resp.ok) {
+    setRunning(false);
+    const text = await resp.text();
+    $("status").textContent = `Hata (${resp.status}): ${text}`;
+    return;
+  }
+  const j = await resp.json();
+  currentJobId = j.job_id;
+  $("status").textContent = `${j.total} nick taranıyor (${j.proxy_count} proxy)...`;
+  pollOnce();
+}
+
+function buildJobRequest() {
+  const useProxies = $("use-proxies").checked;
+  const delay = parseFloat($("delay").value) || 2.5;
+  if (activeTab === "manual") {
+    const usernames = parseUsernames($("usernames").value);
+    if (usernames.length === 0) {
+      $("status").textContent = "En az bir nick gir.";
+      return null;
     }
-  } finally {
-    $("run").disabled = false;
-    $("stop").disabled = true;
-    $("csv").disabled = allResults.length === 0;
-    abortController = null;
+    return {
+      mode: "manual",
+      usernames,
+      use_server_proxies: useProxies,
+      per_request_delay: delay,
+    };
+  }
+  // generated
+  const length = parseInt($("gen-length").value, 10);
+  const count = parseInt($("gen-count").value, 10);
+  if (!Number.isFinite(count) || count < 1) {
+    $("status").textContent = "Adet 1 veya daha büyük olmalı.";
+    return null;
+  }
+  return {
+    mode: "generated",
+    length,
+    count,
+    alphabet: $("gen-alphabet").value,
+    use_server_proxies: useProxies,
+    per_request_delay: delay,
+  };
+}
+
+async function pollOnce() {
+  if (!currentJobId) return;
+  let resp;
+  try {
+    resp = await fetch(`/api/jobs/${currentJobId}`);
+  } catch (e) {
+    $("status").textContent = `Polling hatası: ${e.message} — tekrar deniyorum`;
+    pollTimer = setTimeout(pollOnce, 2000);
+    return;
+  }
+  if (!resp.ok) {
+    $("status").textContent = `Polling HTTP ${resp.status}`;
+    setRunning(false);
+    return;
+  }
+  const job = await resp.json();
+  // Sadece yeni sonuçları rendere ekle
+  const prevLen = allResults.length;
+  allResults = job.results;
+  if (allResults.length !== prevLen || activeFilter) renderResults();
+  updateSummary();
+
+  if (job.state === "running" || job.state === "queued") {
+    $("status").textContent = `${job.processed}/${job.total} işlendi · ${
+      job.proxy_count
+    } proxy · durum: ${job.state}`;
+    pollTimer = setTimeout(pollOnce, 1500);
+  } else {
+    setRunning(false);
+    if (job.state === "done") {
+      $("status").textContent = `Bitti. ${job.processed} sonuç.`;
+    } else if (job.state === "cancelled") {
+      $("status").textContent = `Durduruldu. ${job.processed} sonuç.`;
+    } else {
+      $("status").textContent = `Hata: ${job.error || job.state}`;
+    }
   }
 }
 
-function handleEvent(ev) {
-  if (ev.type === "start") {
-    $("status").textContent = `${ev.total} nick taranıyor (proxy: ${ev.proxy_count})...`;
-  } else if (ev.type === "result") {
-    allResults.push(ev);
-    renderRow(ev);
-    updateSummary();
-    $("status").textContent = `${allResults.length} sonuç işlendi.`;
-  } else if (ev.type === "done") {
-    $("status").textContent = `Bitti. ${allResults.length} sonuç.`;
+async function stopScan() {
+  if (!currentJobId) return;
+  try {
+    await fetch(`/api/jobs/${currentJobId}/cancel`, { method: "POST" });
+  } catch (e) {
+    /* yoksay */
+  }
+}
+
+function setRunning(running) {
+  $("run").disabled = running;
+  $("stop").disabled = !running;
+  $("csv").disabled = running || allResults.length === 0;
+  if (!running) {
+    if (pollTimer) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
   }
 }
 
 function downloadCsv() {
   const rows = [["username", "status", "code", "message", "proxy"]];
   for (const r of allResults) {
-    rows.push([r.username, r.status, r.code || "", r.message || "", r.proxy || ""]);
+    rows.push([
+      r.username,
+      r.status,
+      r.code || "",
+      r.message || r.error || "",
+      r.proxy || "",
+    ]);
   }
   const csv = rows
     .map((row) =>
-      row
-        .map((v) => `"${String(v).replace(/"/g, '""')}"`)
-        .join(",")
+      row.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")
     )
     .join("\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
@@ -191,9 +258,35 @@ function downloadCsv() {
   URL.revokeObjectURL(a.href);
 }
 
+function updateGenHint() {
+  const length = parseInt($("gen-length").value, 10);
+  const alphabet = $("gen-alphabet").value;
+  const sizes = { alnum: 36, alpha: 26, num: 10, alnum_dot: 38 };
+  const space = Math.pow(sizes[alphabet] || 36, length);
+  $("gen-hint").textContent = `Toplam mümkün kombinasyon: ${space.toLocaleString(
+    "tr-TR"
+  )}`;
+}
+
+function setupTabs() {
+  for (const t of document.querySelectorAll(".tab")) {
+    t.addEventListener("click", () => {
+      activeTab = t.dataset.tab;
+      for (const x of document.querySelectorAll(".tab"))
+        x.classList.toggle("active", x === t);
+      $("tab-manual").classList.toggle("hidden", activeTab !== "manual");
+      $("tab-generated").classList.toggle("hidden", activeTab !== "generated");
+    });
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   refreshProxyInfo();
-  $("run").addEventListener("click", run);
-  $("stop").addEventListener("click", () => abortController && abortController.abort());
+  setupTabs();
+  updateGenHint();
+  $("gen-length").addEventListener("change", updateGenHint);
+  $("gen-alphabet").addEventListener("change", updateGenHint);
+  $("run").addEventListener("click", startScan);
+  $("stop").addEventListener("click", stopScan);
   $("csv").addEventListener("click", downloadCsv);
 });

@@ -138,6 +138,35 @@ button.secondary {
   border: 1px solid var(--border);
 }
 .summary .pill strong { margin-left: 4px; color: var(--text); }
+.summary .pill { cursor: pointer; user-select: none; }
+.summary .pill:hover { background: #232a3c; }
+.summary .pill.active { background: #2a3147; border-color: var(--accent-strong); }
+.summary .pill .badge { margin-right: 4px; }
+
+.tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--border); }
+.tab {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+.tab:hover { color: var(--text); background: transparent; }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent-strong); background: transparent; }
+.tab-content.hidden { display: none; }
+.tab-content select, .tab-content input[type="number"] {
+  background: #0b0d12;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 8px;
+  width: 100%;
+  font-size: 13px;
+}
+.hint { color: var(--muted); font-size: 12px; margin: 8px 0 0; }
 
 table {
   width: 100%;

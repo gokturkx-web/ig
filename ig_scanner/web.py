@@ -1,33 +1,54 @@
 """FastAPI tabanlı web arayüzü.
 
-`/`         -> HTML arayüz
-`/api/check` (POST, NDJSON streaming) -> Verilen kullanıcı adlarını sırayla
-                                          kontrol eder ve sonuçları satır
-                                          satır JSON olarak akıtır.
-                                          Body: {"usernames": [...],
-                                                 "use_server_proxies": bool,
-                                                 "per_request_delay": float}
+Endpoints:
+  GET  /                 -> tek sayfalık HTML arayüz
+  GET  /api/proxies      -> server'da yüklü proxy sayısı
+  POST /api/jobs         -> yeni iş başlat. Body: bkz. JobRequest
+  GET  /api/jobs/{id}    -> iş durumu + birikmiş sonuçlar
+  POST /api/jobs/{id}/cancel -> işi iptal et
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
+import logging
 import os
 import random
+import string
+import threading
+import time
+import uuid
 from itertools import cycle
 from pathlib import Path
-from typing import AsyncIterator, List, Optional
+from typing import List, Literal, Optional
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .checker import IGChecker, UsernameStatus
 
+logger = logging.getLogger(__name__)
+
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+# Üretici karakter setleri.
+ALPHABETS: dict[str, str] = {
+    "alnum": string.ascii_lowercase + string.digits,
+    "alpha": string.ascii_lowercase,
+    "num": string.digits,
+    "alnum_dot": string.ascii_lowercase + string.digits + "._",
+}
+
+# UI'dan kabul edilecek maksimum tek-iş bütçesi.
+MAX_USERNAMES_PER_JOB = 500
+MAX_LENGTH = 12
+
+# Tamamlanmış iş kayıtlarını ne kadar tutalım (sn).
+JOB_RETENTION_SEC = 30 * 60
 
 
 # ---------------------------------------------------------------------------
@@ -69,14 +90,237 @@ def load_server_proxies() -> List[str]:
 
 
 # ---------------------------------------------------------------------------
-# Model
+# Üretici
 # ---------------------------------------------------------------------------
 
 
-class CheckRequest(BaseModel):
-    usernames: List[str] = Field(..., description="Kontrol edilecek nickler")
+def generate_random_usernames(
+    length: int, count: int, alphabet_key: str
+) -> List[str]:
+    """Verilen uzunluk + alfabe ile rastgele kullanıcı adları üret.
+
+    Aynı handle iki kez üretilmez. Eğer toplam mümkün kombinasyon `count`'tan
+    azsa, mümkün olan kadarını döndürür.
+    """
+    if alphabet_key not in ALPHABETS:
+        raise ValueError(f"Bilinmeyen alfabe: {alphabet_key}")
+    alphabet = ALPHABETS[alphabet_key]
+    space = len(alphabet) ** length
+    target = min(count, space)
+    seen: set[str] = set()
+    rng = random.SystemRandom()
+    # Üretmeye çalışırken çok fazla deneme yapma — küçük uzayda tüm uzayı tara.
+    if space <= max(5000, target * 4):
+        # Tüm kombinasyonları üret, karıştır, ilk N'i döndür.
+        from itertools import product
+
+        all_combos = (
+            "".join(c) for c in product(alphabet, repeat=length)
+        )
+        # Boyut çok büyükse bu yine yavaş olur ama buraya zaten girmiyoruz.
+        pool = list(all_combos)
+        rng.shuffle(pool)
+        return pool[:target]
+    # Büyük uzay: rastgele üret, tekrarları at.
+    attempts = 0
+    while len(seen) < target and attempts < target * 8:
+        s = "".join(rng.choice(alphabet) for _ in range(length))
+        if alphabet_key == "alnum_dot" and (
+            s[0] in "._" or s[-1] in "._" or ".." in s or "__" in s
+        ):
+            attempts += 1
+            continue
+        seen.add(s)
+        attempts += 1
+    return list(seen)
+
+
+# ---------------------------------------------------------------------------
+# Modeller
+# ---------------------------------------------------------------------------
+
+
+class JobRequest(BaseModel):
+    mode: Literal["manual", "generated"] = "manual"
+    usernames: Optional[List[str]] = None
+    length: Optional[int] = None
+    count: Optional[int] = None
+    alphabet: Optional[str] = "alnum"
     use_server_proxies: bool = True
+    custom_proxies: Optional[List[str]] = None
     per_request_delay: float = 2.5
+
+    @field_validator("per_request_delay")
+    @classmethod
+    def _bounded_delay(cls, v: float) -> float:
+        return max(0.0, min(30.0, v))
+
+
+class JobResult(BaseModel):
+    index: int
+    username: str
+    status: str
+    code: Optional[str] = None
+    message: Optional[str] = None
+    proxy: Optional[str] = None
+    error: Optional[str] = None
+
+
+class JobState(BaseModel):
+    id: str
+    state: Literal["queued", "running", "done", "cancelled", "error"]
+    total: int
+    processed: int
+    started_at: float
+    updated_at: float
+    proxy_count: int
+    results: List[JobResult]
+    error: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Job yöneticisi (in-memory)
+# ---------------------------------------------------------------------------
+
+
+class _Job:
+    def __init__(
+        self,
+        usernames: List[str],
+        proxies: List[str],
+        per_request_delay: float,
+    ):
+        self.id = uuid.uuid4().hex[:16]
+        self.usernames = usernames
+        self.proxies = proxies
+        self.per_request_delay = per_request_delay
+        self.state: str = "queued"
+        self.results: List[JobResult] = []
+        self.started_at = time.time()
+        self.updated_at = time.time()
+        self.error: Optional[str] = None
+        self._cancel = threading.Event()
+        self._lock = threading.Lock()
+
+    def to_state(self) -> JobState:
+        with self._lock:
+            return JobState(
+                id=self.id,
+                state=self.state,  # type: ignore[arg-type]
+                total=len(self.usernames),
+                processed=len(self.results),
+                started_at=self.started_at,
+                updated_at=self.updated_at,
+                proxy_count=len(self.proxies),
+                results=list(self.results),
+                error=self.error,
+            )
+
+
+_jobs: dict[str, _Job] = {}
+_jobs_lock = threading.Lock()
+
+
+def _gc_old_jobs() -> None:
+    now = time.time()
+    with _jobs_lock:
+        stale = [
+            jid for jid, j in _jobs.items()
+            if j.state in ("done", "cancelled", "error")
+            and now - j.updated_at > JOB_RETENTION_SEC
+        ]
+        for jid in stale:
+            del _jobs[jid]
+
+
+def _run_job(job: _Job) -> None:
+    """Worker thread: usernames'i sırayla kontrol et, results'a ekle."""
+    job.state = "running"
+    checkers = [IGChecker(proxy=p) for p in job.proxies] if job.proxies else [IGChecker(proxy=None)]
+    proxy_idx = cycle(range(len(checkers)))
+    try:
+        for i, username in enumerate(job.usernames):
+            if job._cancel.is_set():
+                with job._lock:
+                    job.state = "cancelled"
+                    job.updated_at = time.time()
+                return
+
+            idx = next(proxy_idx)
+            checker = checkers[idx]
+
+            # 429 olursa sırayla başka proxy'leri dene (en fazla 3).
+            tried = {idx}
+            res = None
+            err: Optional[str] = None
+            for _ in range(min(3, len(checkers))):
+                try:
+                    res = checker.check(username)
+                except Exception as e:
+                    err = f"{type(e).__name__}: {str(e)[:120]}"
+                    res = None
+                    # Bu proxy bozuk olabilir; başka birini dene.
+                else:
+                    err = None
+                    if res.status != UsernameStatus.RATE_LIMITED:
+                        break
+                # Sıradaki farklı proxy'yi seç
+                next_idx: Optional[int] = None
+                for _ in range(len(checkers)):
+                    cand = next(proxy_idx)
+                    if cand not in tried:
+                        next_idx = cand
+                        break
+                if next_idx is None:
+                    break
+                tried.add(next_idx)
+                checker = checkers[next_idx]
+                idx = next_idx
+
+            with job._lock:
+                if res is not None:
+                    job.results.append(
+                        JobResult(
+                            index=i,
+                            username=username,
+                            status=res.status.value,
+                            code=res.code,
+                            message=res.message,
+                            proxy=_proxy_label(job.proxies[idx]) if job.proxies else None,
+                        )
+                    )
+                else:
+                    job.results.append(
+                        JobResult(
+                            index=i,
+                            username=username,
+                            status="unknown",
+                            error=err or "unknown error",
+                            proxy=_proxy_label(job.proxies[idx]) if job.proxies else None,
+                        )
+                    )
+                job.updated_at = time.time()
+
+            if i < len(job.usernames) - 1:
+                # Gecikme; cancel beklerken kısa kontrol döngüsü
+                end = time.time() + job.per_request_delay + random.uniform(
+                    0, job.per_request_delay * 0.25
+                )
+                while time.time() < end:
+                    if job._cancel.is_set():
+                        break
+                    time.sleep(0.1)
+
+        with job._lock:
+            if job.state != "cancelled":
+                job.state = "done"
+            job.updated_at = time.time()
+    except Exception as e:
+        logger.exception("job %s failed", job.id)
+        with job._lock:
+            job.state = "error"
+            job.error = f"{type(e).__name__}: {str(e)[:200]}"
+            job.updated_at = time.time()
 
 
 # ---------------------------------------------------------------------------
@@ -105,122 +349,95 @@ def create_app() -> FastAPI:
         proxies = load_server_proxies()
         return {"count": len(proxies), "configured": bool(proxies)}
 
-    @app.post("/api/check")
-    async def check(req: CheckRequest, request: Request) -> StreamingResponse:
-        # Boş satırları/biçim olarak çok bariz hatalıları temizle
+    @app.get("/api/alphabets")
+    def alphabets() -> dict:
+        return {
+            k: {"chars": v, "size": len(v)} for k, v in ALPHABETS.items()
+        }
+
+    @app.post("/api/jobs")
+    def create_job(req: JobRequest) -> dict:
+        _gc_old_jobs()
+
+        # 1) Kullanıcı listesi belirle
+        if req.mode == "manual":
+            raw = req.usernames or []
+        elif req.mode == "generated":
+            if not req.length or not req.count:
+                raise HTTPException(400, "length ve count gerekli")
+            if req.length < 1 or req.length > MAX_LENGTH:
+                raise HTTPException(400, f"length 1..{MAX_LENGTH} aralığında olmalı")
+            if req.count < 1 or req.count > MAX_USERNAMES_PER_JOB:
+                raise HTTPException(
+                    400, f"count 1..{MAX_USERNAMES_PER_JOB} aralığında olmalı"
+                )
+            try:
+                raw = generate_random_usernames(
+                    req.length, req.count, req.alphabet or "alnum"
+                )
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+        else:
+            raise HTTPException(400, f"bilinmeyen mode: {req.mode}")
+
+        # 2) Temizle
         cleaned: List[str] = []
         seen: set[str] = set()
-        for raw in req.usernames:
-            u = raw.strip().lstrip("@")
-            if not u:
+        for u in raw:
+            uu = (u or "").strip().lstrip("@")
+            if not uu or uu in seen:
                 continue
-            if u in seen:
-                continue
-            seen.add(u)
-            cleaned.append(u)
+            seen.add(uu)
+            cleaned.append(uu)
 
-        proxies: List[Optional[str]] = []
+        if not cleaned:
+            raise HTTPException(400, "Kontrol edilecek nick yok")
+        if len(cleaned) > MAX_USERNAMES_PER_JOB:
+            raise HTTPException(
+                400, f"En fazla {MAX_USERNAMES_PER_JOB} nick olabilir"
+            )
+
+        # 3) Proxy seç
+        proxies: List[str] = []
+        if req.custom_proxies:
+            proxies.extend(p.strip() for p in req.custom_proxies if p.strip())
         if req.use_server_proxies:
-            proxies = list(load_server_proxies())
-        if not proxies:
-            proxies = [None]
+            proxies.extend(load_server_proxies())
+        # tekrarları at
+        proxies = list(dict.fromkeys(proxies))
 
-        return StreamingResponse(
-            _stream(cleaned, proxies, req.per_request_delay, request),
-            media_type="application/x-ndjson",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
-            },
-        )
+        # 4) Job oluştur ve başlat
+        job = _Job(cleaned, proxies, req.per_request_delay)
+        with _jobs_lock:
+            _jobs[job.id] = job
+        threading.Thread(target=_run_job, args=(job,), daemon=True).start()
+        return {
+            "job_id": job.id,
+            "total": len(cleaned),
+            "proxy_count": len(proxies),
+        }
+
+    @app.get("/api/jobs/{job_id}")
+    def get_job(job_id: str) -> JobState:
+        job = _jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Job bulunamadı")
+        return job.to_state()
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: str) -> dict:
+        job = _jobs.get(job_id)
+        if job is None:
+            raise HTTPException(404, "Job bulunamadı")
+        job._cancel.set()
+        return {"ok": True}
 
     return app
 
 
-# ---------------------------------------------------------------------------
-# Stream
-# ---------------------------------------------------------------------------
-
-
-async def _stream(
-    usernames: List[str],
-    proxies: List[Optional[str]],
-    per_request_delay: float,
-    request: Request,
-) -> AsyncIterator[bytes]:
-    """Her nick için sonucu NDJSON satırı olarak akıt."""
-
-    yield _line({
-        "type": "start",
-        "total": len(usernames),
-        "proxy_count": len([p for p in proxies if p]),
-    })
-
-    # Proxy başına bir checker; round-robin paylaşıyoruz.
-    checkers = [IGChecker(proxy=p) for p in proxies]
-    proxy_iter = cycle(range(len(checkers)))
-
-    loop = asyncio.get_running_loop()
-    try:
-        for i, username in enumerate(usernames):
-            if await request.is_disconnected():
-                return
-
-            idx = next(proxy_iter)
-            checker = checkers[idx]
-
-            # Rate-limit'e takılırsak en fazla 2 farklı checker daha dene.
-            attempted_idxs = {idx}
-            result = None
-            for attempt in range(min(3, len(checkers))):
-                result = await loop.run_in_executor(
-                    None, checker.check, username
-                )
-                if result.status != UsernameStatus.RATE_LIMITED:
-                    break
-                # Başka bir proxy varsa ona geç
-                next_idx = None
-                for _ in range(len(checkers)):
-                    cand = next(proxy_iter)
-                    if cand not in attempted_idxs:
-                        next_idx = cand
-                        break
-                if next_idx is None:
-                    break
-                attempted_idxs.add(next_idx)
-                checker = checkers[next_idx]
-                idx = next_idx
-
-            assert result is not None
-            payload = {
-                "type": "result",
-                "index": i,
-                "username": result.username,
-                "status": result.status.value,
-                "code": result.code,
-                "message": result.message,
-                "proxy": _proxy_label(proxies[idx]) if proxies[idx] else None,
-            }
-            yield _line(payload)
-
-            # Aynı checker'a (proxy'ye) iki istek arası kısa nefes ver.
-            if i < len(usernames) - 1:
-                await asyncio.sleep(
-                    per_request_delay
-                    + random.uniform(0, per_request_delay * 0.2)
-                )
-    finally:
-        yield _line({"type": "done"})
-
-
-def _line(obj: dict) -> bytes:
-    return (json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8")
-
-
-def _proxy_label(proxy_url: str) -> str:
-    # user:pass'i sızdırma; sadece host:port döndür.
-    from urllib.parse import urlsplit
-
+def _proxy_label(proxy_url: Optional[str]) -> Optional[str]:
+    if not proxy_url:
+        return None
     u = urlsplit(proxy_url)
     return f"{u.hostname}:{u.port}"
 
