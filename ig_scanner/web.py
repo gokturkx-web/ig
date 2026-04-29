@@ -249,11 +249,12 @@ def _run_job(job: _Job) -> None:
             idx = next(proxy_idx)
             checker = checkers[idx]
 
-            # 429 olursa sırayla başka proxy'leri dene (en fazla 3).
+            # 429 ya da proxy hatası olursa sırayla başka proxy'leri dene.
             tried = {idx}
             res = None
             err: Optional[str] = None
-            for _ in range(min(3, len(checkers))):
+            max_attempts = min(6, len(checkers))
+            for _ in range(max_attempts):
                 try:
                     res = checker.check(username)
                 except Exception as e:
