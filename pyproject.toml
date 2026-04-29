@@ -1,0 +1,25 @@
+[project]
+name = "ig-username-scanner"
+version = "0.1.0"
+description = "Instagram'da boş kullanıcı adlarını signup endpoint'i üzerinden güvenilir şekilde tespit eden tarayıcı."
+requires-python = ">=3.10"
+dependencies = [
+    "requests[socks]>=2.31",
+    "fastapi[standard]>=0.110",
+    "uvicorn>=0.27",
+]
+
+[project.scripts]
+ig-scanner = "ig_scanner.scanner:main"
+ig-check = "ig_scanner.checker:_main"
+ig-web = "ig_scanner.web:_cli"
+
+[tool.setuptools.package-data]
+ig_scanner = ["static/*.html", "static/*.css", "static/*.js"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ig_scanner*"]

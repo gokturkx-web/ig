@@ -1,0 +1,6 @@
+# Webshare formatı: http://USER:PASS@IP:PORT
+# Her satıra bir proxy yaz. # ile başlayan satırlar yorum.
+# Bu dosyayı kopyala: cp examples/proxies.example.txt proxies.txt
+# (proxies.txt .gitignore içinde olduğu için commitlenmez.)
+http://USER:PASS@1.2.3.4:8080
+http://USER:PASS@5.6.7.8:8080
