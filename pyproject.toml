@@ -5,9 +5,8 @@ description = "Instagram'da boş kullanıcı adlarını signup endpoint'i üzeri
 requires-python = ">=3.10"
 dependencies = [
     "requests>=2.31",
-    "fastapi>=0.110",
+    "fastapi[standard]>=0.110",
     "uvicorn>=0.27",
-    "sse-starlette>=2.0",
 ]
 
 [project.scripts]
