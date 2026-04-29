@@ -9,3 +9,5 @@ results/
 proxies.txt
 proxies*.txt
 !examples/proxies.example.txt
+advanced_ok.txt
+advanced_rate_limited.txt
