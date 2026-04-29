@@ -40,15 +40,19 @@ function parseUsernames(text) {
 function renderRow(payload) {
   const tbody = $("results").querySelector("tbody");
   const tr = document.createElement("tr");
+  // payload.status sadece bilinen anahtarlardan biri (STATUS_LABELS), o
+  // yüzden CSS sınıfı olarak doğrudan kullanılabilir; ama yine de
+  // beklenmedik bir değer gelirse escape ediyoruz.
+  const status = payload.status in STATUS_LABELS ? payload.status : "unknown";
   tr.innerHTML = `
     <td>${payload.index + 1}</td>
     <td class="nick">${escapeHtml(payload.username)}</td>
-    <td><span class="badge ${payload.status}">${
-    STATUS_LABELS[payload.status] || payload.status
-  }</span></td>
-    <td class="code">${payload.code || ""}</td>
+    <td><span class="badge ${status}">${escapeHtml(
+    STATUS_LABELS[status] || status
+  )}</span></td>
+    <td class="code">${escapeHtml(payload.code || "")}</td>
     <td>${escapeHtml(payload.message || "")}</td>
-    <td class="proxy">${payload.proxy || "kendi IP"}</td>
+    <td class="proxy">${escapeHtml(payload.proxy || "kendi IP")}</td>
   `;
   tbody.appendChild(tr);
   // En son satıra scroll et
